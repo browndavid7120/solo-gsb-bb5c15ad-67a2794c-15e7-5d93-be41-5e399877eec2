@@ -83,11 +83,27 @@ function seedIfEmpty() {
   const out = db.prepare(
     'SELECT allergens FROM batch_outputs WHERE batch_id = ?'
   ).get(batchIds['BATCH-003']);
-  db.prepare(
+  const releaseId = db.prepare(
     `INSERT INTO releases (batch_id, released_at, released_by, snapshot_allergens, status, created_event_seq)
      VALUES (?,?,?,?,'ACTIVE',(SELECT COUNT(*) FROM events))`
   ).run(batchIds['BATCH-003'], '2026-09-30T11:30', '质检员-王敏',
-        sortedJson(JSON.parse(out.allergens)));
+        sortedJson(JSON.parse(out.allergens))).lastInsertRowid;
+
+  // 为本次包装登记一卷过敏原标签（拟印集合与当前推导、放行快照一致；印量 500）
+  const snapshot = sortedJson(JSON.parse(out.allergens));
+  const rollId = db.prepare(
+    `INSERT INTO label_rolls
+       (roll_code, batch_id, release_id, print_qty, applied_qty, void_qty,
+        revision, allergen_set, registered_at, registered_by, status, retired_reason)
+     VALUES ('', ?, ?, 500, 120, 5, 2, ?, '2026-09-30T12:10', '包装组长-李雷', 'ACTIVE', '')`
+  ).run(batchIds['BATCH-003'], releaseId, snapshot).lastInsertRowid;
+  db.prepare('UPDATE label_rolls SET roll_code = ? WHERE id = ?')
+    .run(`LABEL-${String(rollId).padStart(4, '0')}`, rollId);
+  db.prepare(
+    `INSERT INTO label_roll_usages (roll_id, used_at, applied_qty, void_qty, expected_revision, used_by)
+     VALUES (?, '2026-09-30T13:05', 100, 3, 0, '包装工-赵强'),
+            (?, '2026-09-30T13:40', 20, 2, 1, '包装工-赵强')`
+  ).run(rollId, rollId);
 
   return true;
 }

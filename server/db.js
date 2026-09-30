@@ -89,9 +89,41 @@ function initSchema(d) {
     created_event_seq INTEGER NOT NULL DEFAULT 0  -- 登记时的事件版本号
   );
 
+  -- 过敏原标签卷：包装前按“当前批次推导集合 ∩ 所选有效放行快照”一致后登记一卷。
+  -- 卷一旦停用（status='RETIRED'）为终态：余量不可再贴，即使集合后来恢复也不自动解冻。
+  CREATE TABLE IF NOT EXISTS label_rolls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    roll_code TEXT NOT NULL UNIQUE,         -- 卷号，如 LABEL-0001（登记事务内补发）
+    batch_id INTEGER REFERENCES batches(id) ON DELETE SET NULL,
+    release_id INTEGER REFERENCES releases(id) ON DELETE SET NULL,
+    print_qty INTEGER NOT NULL CHECK (print_qty > 0),  -- 印量（正整数张数）
+    applied_qty INTEGER NOT NULL DEFAULT 0 CHECK (applied_qty >= 0), -- 已贴用
+    void_qty INTEGER NOT NULL DEFAULT 0 CHECK (void_qty >= 0),       -- 已作废
+    revision INTEGER NOT NULL DEFAULT 0,    -- 核销修订号（乐观并发：每次核销 +1）
+    allergen_set TEXT NOT NULL DEFAULT '[]',-- 拟印过敏原集合（规范化排序 JSON）
+    registered_at TEXT NOT NULL,
+    registered_by TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','RETIRED')),
+    retired_reason TEXT NOT NULL DEFAULT '', -- 停用原因（终态留痕）
+    CHECK (applied_qty + void_qty <= print_qty)
+  );
+
+  -- 标签卷核销流水：贴用 / 作废按修订号核销，整次事务化。
+  CREATE TABLE IF NOT EXISTS label_roll_usages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    roll_id INTEGER NOT NULL REFERENCES label_rolls(id) ON DELETE CASCADE,
+    used_at TEXT NOT NULL,
+    applied_qty INTEGER NOT NULL CHECK (applied_qty >= 0),
+    void_qty INTEGER NOT NULL CHECK (void_qty >= 0),
+    expected_revision INTEGER NOT NULL,     -- 客户端核销时依据的修订号
+    used_by TEXT NOT NULL DEFAULT ''
+  );
+
   CREATE INDEX IF NOT EXISTS idx_events_time ON events(event_time, id);
   CREATE INDEX IF NOT EXISTS idx_process_inputs_event ON process_inputs(event_id);
   CREATE INDEX IF NOT EXISTS idx_releases_batch ON releases(batch_id);
+  CREATE INDEX IF NOT EXISTS idx_label_rolls_batch ON label_rolls(batch_id);
+  CREATE INDEX IF NOT EXISTS idx_label_usages_roll ON label_roll_usages(roll_id);
   `);
 }
 

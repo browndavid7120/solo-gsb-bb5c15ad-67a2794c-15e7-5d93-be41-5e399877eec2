@@ -158,4 +158,45 @@ table.grid tr:last-child td { border-bottom: none; }
 .notice .close { float: right; cursor: pointer; font-weight: bold; }
 
 details summary { cursor: pointer; color: var(--primary); font-size: 12.5px; margin-top: 6px; }
+
+/* 标签卷 */
+.section-hint {
+  background: #f4f8fa; border: 1px solid var(--line); border-radius: 8px;
+  padding: 10px 14px; color: #40535f; font-size: 12.5px; line-height: 1.7; margin: 8px 0 14px;
+}
+.batch-roll-summary {
+  margin-top: 8px; font-size: 12.5px; color: var(--primary); cursor: pointer;
+  background: #f4f8fa; border-radius: 6px; padding: 6px 10px; display: inline-block;
+}
+.batch-roll-summary .retired-text { color: var(--danger); }
+.roll-list { display: flex; flex-direction: column; gap: 16px; }
+.roll-group-title { font-size: 14px; margin: 0 0 8px; color: #33475b; }
+.roll-card {
+  background: var(--card); border: 1px solid var(--line); border-left: 4px solid var(--ok);
+  border-radius: 10px; padding: 13px 16px; margin-bottom: 10px;
+}
+.roll-card.retired { border-left-color: var(--danger); background: #fdf7f6; }
+.roll-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.roll-code { font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.roll-head .spacer { flex: 1; }
+.roll-numbers { display: flex; gap: 10px; margin: 10px 0; flex-wrap: wrap; }
+.roll-num {
+  flex: 1; min-width: 96px; border: 1px solid var(--line); border-radius: 8px;
+  padding: 8px 10px; display: flex; flex-direction: column; align-items: center; background: #fbfcfd;
+}
+.roll-num .n { font-size: 19px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.roll-num .l { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.roll-num.remain { background: var(--ok-bg); border-color: #b7dcc5; }
+.roll-num.remain .n { color: var(--ok); }
+.roll-num.remain-frozen { background: var(--danger-bg); border-color: #e3b3ac; }
+.roll-num.remain-frozen .n { color: var(--danger); }
+.consume-form {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  border-top: 1px dashed var(--line); padding-top: 10px;
+}
+.consume-form label { font-size: 12.5px; color: #33475b; display: flex; align-items: center; gap: 5px; }
+.consume-form input[type=number] { width: 74px; padding: 5px 8px; border: 1px solid #cdd7e0; border-radius: 6px; }
+.consume-form .consume-by { width: 130px; padding: 5px 8px; border: 1px solid #cdd7e0; border-radius: 6px; }
+.roll-retired-reason { color: var(--danger); font-size: 12.5px; font-weight: 600; margin-bottom: 4px; }
+
 @media (max-width: 860px) { .base-grid { grid-template-columns: 1fr; } }

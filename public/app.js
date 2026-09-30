@@ -1,6 +1,6 @@
 'use strict';
 
-let state = { materials: [], equipment: [], events: [], batches: [] };
+let state = { materials: [], equipment: [], events: [], batches: [], label_rolls: [] };
 let editingEventId = null;
 
 const $ = (sel) => document.querySelector(sel);
@@ -54,11 +54,19 @@ function reportInvalidated(list) {
   }
 }
 
+function reportRetiredRolls(list) {
+  if (Array.isArray(list) && list.length) {
+    notice('error', `${list.length} 卷过敏原标签已永久停用（余量冻结，已贴数量待复核）`,
+      list.map((r) => `${r.roll_code || ('卷#' + r.id)}${r.batch_code ? '（' + r.batch_code + '）' : ''}：${r.reason}`));
+  }
+}
+
 // ================= 渲染 =================
 async function refresh() {
   state = await api('/api/state');
   renderResidue();
   renderBatches();
+  renderRolls();
   renderEvents();
   renderBase();
 }
@@ -103,6 +111,7 @@ function renderBatches() {
           : (invalidReleases.length ? '<span class="badge invalid">放行已失效</span>' : '<span class="tag none">未放行</span>')}
         <button class="btn small primary" onclick="openRelease(${b.id})">登记放行</button>
       </div>
+      ${renderBatchRollSummary(b.id)}
       <div style="margin-top:8px" class="tag-row">
         <b style="font-size:12.5px;color:var(--muted)">推导过敏原：</b>${allergenTags(b.allergens)}
       </div>
@@ -124,6 +133,82 @@ function renderBatches() {
       </div>
     </div>`;
   }).join('') || '<div class="batch-meta">尚无批次，请先录入加工事件。</div>';
+}
+
+function renderBatchRollSummary(batchId) {
+  const rolls = (state.label_rolls || []).filter((r) => r.batch_id === batchId);
+  if (!rolls.length) return '';
+  const active = rolls.filter((r) => r.active).length;
+  const retired = rolls.length - active;
+  return `
+    <div class="batch-roll-summary" onclick="gotoRolls()">
+      📦 标签卷 ${rolls.length} 卷：
+      <b>${active}</b> 卷可用${retired ? `，<span class="retired-text">${retired} 卷已停用</span>` : ''}
+      <span class="batch-meta">（点击查看印量/贴用/作废/剩余）</span>
+    </div>`;
+}
+window.gotoRolls = function () {
+  $$('.tab').find((x) => x.dataset.tab === 'labels').click();
+};
+
+function renderRolls() {
+  const rolls = state.label_rolls || [];
+  if (!rolls.length) {
+    $('#rollList').innerHTML = '<div class="batch-meta">尚无标签卷。包装前请先选择“存在有效放行”的批次登记一卷。</div>';
+    return;
+  }
+  // 按批次分组（含批次已删除的孤儿卷）
+  const groups = new Map();
+  for (const r of rolls) {
+    const key = r.batch_id == null ? '__orphan__' : r.batch_id;
+    if (!groups.has(key)) groups.set(key, { code: r.batch_code || '（批次已删除）', items: [] });
+    groups.get(key).items.push(r);
+  }
+  const sortedGroups = [...groups.entries()].sort((a, b) =>
+    (a[0] === '__orphan__' ? 1 : 0) - (b[0] === '__orphan__' ? 1 : 0) ||
+    a[1].code.localeCompare(b[1].code, 'zh'));
+
+  $('#rollList').innerHTML = sortedGroups.map(([, g]) => `
+    <div class="roll-group">
+      <h3 class="roll-group-title">批次 ${esc(g.code)}</h3>
+      ${g.items.map(renderRollCard).join('')}
+    </div>`).join('');
+}
+
+function renderRollCard(r) {
+  return `
+  <div class="roll-card ${r.active ? '' : 'retired'}">
+    <div class="roll-head">
+      <span class="roll-code">${esc(r.roll_code)}</span>
+      <span class="badge ${r.active ? 'active' : 'invalid'}">${r.active ? '使用中' : '已永久停用'}</span>
+      <span class="batch-meta">登记 ${esc(fmtTime(r.registered_at))} · ${esc(r.registered_by)}</span>
+      <span class="spacer"></span>
+      <span class="batch-meta">当前修订号 <b>${r.revision}</b></span>
+    </div>
+    <div class="tag-row" style="margin:8px 0">
+      <b class="batch-meta">拟印集合：</b>${allergenTags(r.allergens, '无过敏原')}
+      ${r.release_id ? '' : '<span class="tag danger">绑定放行已删除</span>'}
+    </div>
+    <div class="roll-numbers">
+      <div class="roll-num"><span class="n">${r.print_qty}</span><span class="l">印量</span></div>
+      <div class="roll-num"><span class="n">${r.applied_qty}</span><span class="l">贴用${r.active ? '' : '（待复核）'}</span></div>
+      <div class="roll-num"><span class="n">${r.void_qty}</span><span class="l">作废</span></div>
+      <div class="roll-num ${r.active ? 'remain' : 'remain-frozen'}">
+        <span class="n">${r.remaining_qty}</span><span class="l">${r.active ? '剩余可贴' : '余量冻结'}</span>
+      </div>
+    </div>
+    ${r.active ? `
+      <form class="consume-form" data-roll-id="${r.id}">
+        <input type="hidden" name="expected_revision" value="${r.revision}">
+        <span class="batch-meta">按修订号 ${r.revision} 核销：</span>
+        <label>贴用 <input type="number" name="applied" min="0" step="1" value="0"></label>
+        <label>作废 <input type="number" name="voided" min="0" step="1" value="0"></label>
+        <label>操作人 <input type="text" name="used_by" placeholder="姓名/工号" class="consume-by"></label>
+        <button type="submit" class="btn small primary">核销（整次提交）</button>
+      </form>` : `
+      <div class="roll-retired-reason">⛔ 停用原因：${esc(r.retired_reason || '—')}</div>
+      <div class="batch-meta">已贴 ${r.applied_qty} 张已标记待复核；即使集合后来恢复，本卷也不会自动解冻。</div>`}
+  </div>`;
 }
 
 function renderEvents() {
@@ -290,6 +375,7 @@ $('#eventForm').onsubmit = async (e) => {
     $('#eventModal').classList.add('hidden');
     await refresh();
     if (r.invalidated && r.invalidated.length) reportInvalidated(r.invalidated);
+    if (r.retired_rolls && r.retired_rolls.length) reportRetiredRolls(r.retired_rolls);
   } catch (err) {
     notice('error', err.error || '提交失败', err.details);
   }
@@ -302,6 +388,7 @@ window.deleteEvent = async function (id) {
     await refresh();
     notice('ok', '事件已删除并重算');
     reportInvalidated(r.invalidated);
+    reportRetiredRolls(r.retired_rolls);
   } catch (err) { notice('error', err.error || '删除失败', err.details); }
 };
 
@@ -332,6 +419,7 @@ $('#materialForm').onsubmit = async (e) => {
       await refresh();
       notice('ok', '原料已更新并重算');
       reportInvalidated(r.invalidated);
+      reportRetiredRolls(r.retired_rolls);
     } else {
       await api('/api/materials', { method: 'POST', body });
       await refresh();
@@ -407,10 +495,94 @@ $('#releaseForm').onsubmit = async (e) => {
   } catch (err) { notice('error', err.error || '登记失败', err.details); }
 };
 window.deleteRelease = async (id) => {
-  if (!confirm('删除该放行记录？')) return;
-  await api(`/api/releases/${id}`, { method: 'DELETE' });
-  await refresh();
+  if (!confirm('删除该放行记录？其名下仍有效的过敏原标签卷将被永久停用（余量冻结、已贴待复核）。')) return;
+  try {
+    const r = await api(`/api/releases/${id}`, { method: 'DELETE' });
+    await refresh();
+    notice('ok', '放行记录已删除');
+    reportRetiredRolls(r.retired_rolls);
+  } catch (err) { notice('error', err.error || '删除失败', err.details); }
 };
+
+// ================= 过敏原标签卷 =================
+function batchesWithActiveRelease() {
+  return state.batches.filter((b) => (b.releases || []).some((x) => x.status === 'ACTIVE'));
+}
+
+$('#btnNewRoll').onclick = () => {
+  const f = $('#rollForm');
+  f.reset();
+  const candidates = batchesWithActiveRelease();
+  $('#rollBatch').innerHTML = candidates.length
+    ? candidates.map((b) => `<option value="${b.id}">${esc(b.code)}（${esc(fmtTime(b.produced_at))}）</option>`).join('')
+    : '';
+  $('#rollCurrent').innerHTML = candidates.length
+    ? allergenTags(candidates[0].allergens)
+    : '<span class="tag danger">没有存在有效放行的批次；请先在“批次与放行”登记放行</span>';
+  fillRollReleaseOptions(candidates[0]);
+  if (candidates[0]) {
+    $('#rollAllergens').value = candidates[0].allergens.join(',');
+  }
+  $('#rollModal').classList.remove('hidden');
+};
+
+$('#rollBatch').onchange = (e) => {
+  const b = state.batches.find((x) => x.id === parseInt(e.target.value, 10));
+  $('#rollCurrent').innerHTML = b ? allergenTags(b.allergens) : '';
+  fillRollReleaseOptions(b);
+  if (b) $('#rollAllergens').value = b.allergens.join(',');
+};
+
+function fillRollReleaseOptions(batch) {
+  const active = batch ? (batch.releases || []).filter((r) => r.status === 'ACTIVE') : [];
+  $('#rollRelease').innerHTML = active.length
+    ? active.map((r) => `<option value="${r.id}">${esc(fmtTime(r.released_at))} · ${esc(r.released_by)}｜快照：${esc(r.snapshot_allergens.join('、') || '无过敏原')}</option>`).join('')
+    : '';
+}
+
+$('#rollRelease').onchange = () => { /* 集合展示不变；三方一致由后端强制 */ };
+
+$('#rollForm').onsubmit = async (e) => {
+  e.preventDefault();
+  const f = e.target;
+  const batch_id = parseInt(f.batch_id.value, 10);
+  const body = {
+    batch_id,
+    release_id: parseInt(f.release_id.value, 10),
+    allergens: f.allergens_text.value.split(/[,，;；]/).map((s) => s.trim()).filter(Boolean),
+    print_qty: parseInt(f.print_qty.value, 10),
+    registered_by: f.registered_by.value
+  };
+  try {
+    const r = await api('/api/label-rolls', { method: 'POST', body });
+    $('#rollModal').classList.add('hidden');
+    $$('.tab').find((x) => x.dataset.tab === 'labels').click();
+    await refresh();
+    notice('ok', `登记成功：卷号 ${r.roll_code}，印量 ${r.print_qty}，可用张数 ${r.remaining_qty}`);
+  } catch (err) { notice('error', err.error || '登记失败', err.details); }
+};
+
+// 核销（事件委托，动态表单也生效）
+$('#rollList').addEventListener('submit', async (e) => {
+  const form = e.target.closest('.consume-form');
+  if (!form) return;
+  e.preventDefault();
+  const rollId = form.dataset.rollId;
+  const body = {
+    expected_revision: parseInt(form.expected_revision.value, 10),
+    applied: parseInt(form.applied.value, 10),
+    voided: parseInt(form.voided.value, 10),
+    used_by: form.used_by.value
+  };
+  try {
+    const r = await api(`/api/label-rolls/${rollId}/consume`, { method: 'POST', body });
+    await refresh();
+    notice('ok', `核销成功：${r.roll_code} 新修订号 ${r.revision}，剩余可贴 ${r.remaining_qty} 张`);
+  } catch (err) {
+    notice('error', err.error || '核销被拒绝', err.details);
+    await refresh(); // 修订号可能已被他人推进，刷新表单
+  }
+});
 
 // ================= 启动 =================
 refresh().catch((err) => notice('error', '加载状态失败', err.message || String(err)));

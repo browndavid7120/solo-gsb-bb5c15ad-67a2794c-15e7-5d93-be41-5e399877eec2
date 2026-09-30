@@ -1,7 +1,8 @@
 # 食品加工换线 · 过敏原追踪与放行系统
 
 本地运行的食品加工过敏原追溯网页：录入**原料过敏原、设备、按时间排序的加工事件与已核实清洗事件**，
-系统按时间顺序推导每个产出批次的过敏原集合及来源路径，管理设备残留，并支持按**当时推导结果**登记批次放行。
+系统按时间顺序推导每个产出批次的过敏原集合及来源路径，管理设备残留，支持按**当时推导结果**登记批次放行，
+并在**包装前按批次 + 有效放行登记过敏原标签卷**（按修订号核销贴用/作废，集合或放行变化时永久停用）。
 
 - 后端：Node.js + Express
 - 数据库：SQLite（[better-sqlite3](https://github.com/WiseLibs/better-sqlite3)，数据文件本地保存）
@@ -131,6 +132,99 @@ curl -s -X POST http://localhost:3000/api/replan/apply \
 | apply 的 changes 与预演不一致 | 409 | `CHANGES_MISMATCH` |
 | 预演后正式数据已变更导致版本过期（含重复应用同一版本、版本过期） | 409 | `VERSION_EXPIRED` |
 
+## 过敏原标签卷（包装前登记 → 核销贴用/作废）
+
+包装前，按**现有批次**与其**有效放行记录**登记一卷过敏原标签：
+
+- 登记必须录入**拟印过敏原集合**、**正整数印量（张）**与**操作人**；
+  拟印集合必须与①该批次**当前推导结果**、②所选**放行快照****完全一致**（三方一致，顺序/重复不敏感），
+  否则整次拒绝。登记成功返回**卷号**（`LABEL-0001` 起）与**可用张数**。
+- 每卷凭**预期修订号**（`expected_revision`，登记时为 0，每次核销 +1）核销**贴用**与**作废**张数；
+  累计贴用 + 作废不得超过印量。**旧修订号、负数、超量均整次拒绝**（事务回滚，修订号不前进）。
+- **永久停用（终态）**：原料或加工事件变更、整组换线确认应用使该批次集合改变，
+  或绑定的放行记录失效、被删除时，该卷立即永久停用——
+  **余量不可再贴，已贴数量标记“待复核”**；即使过敏原集合后来恢复一致，**也不会自动解冻**，
+  需在新的有效放行下登记新卷。
+- “过敏原标签卷”页按**批次分组**显示每卷的**印量、贴用、作废、剩余**及**停用原因**；
+  批次卡片上也有该批标签卷数量摘要，可一键跳转。
+- 整组预演返回的 `diff.label_rolls_will_retire` 会列出应用后**将被永久停用**的卷（含待复核张数），
+  预演本身不停用任何正式卷；确认应用的响应 `retired_rolls` 为实际停用的卷。
+
+### HTTP API
+
+| 方法与路径 | 说明 |
+| --- | --- |
+| `POST /api/label-rolls` | 登记一卷（三方一致校验），返回卷对象（含 `roll_code`、`remaining_qty`） |
+| `POST /api/label-rolls/:id/consume` | 按预期修订号核销贴用/作废，返回更新后的卷对象（含新 `revision`） |
+| `GET /api/state` | 顶层新增 `label_rolls` 数组（既有字段不变），按批次含卷号/印量/贴用/作废/剩余/修订号/状态/停用原因 |
+| `DELETE /api/releases/:id` | 语义不变（仍返回 `ok:true`），另附 `retired_rolls`：其名下有效卷被永久停用 |
+| 事件 `POST/PUT/DELETE`、原料 `PUT` | 响应形状不变，另附 `retired_rolls`（本次重算导致停用的卷） |
+
+登记请求体：
+
+```json
+{ "batch_id": 3, "release_id": 1,
+  "allergens": ["乳", "蛋", "芝麻"],
+  "print_qty": 500,
+  "registered_by": "包装组长-李雷",
+  "registered_at": "2026-09-30T12:10" }
+```
+
+核销请求体（`applied`/`voided` 也可写作 `used`/`void_qty`；`expected_revision` 必传）：
+
+```json
+{ "expected_revision": 0, "applied": 100, "voided": 3,
+  "used_by": "包装工-赵强", "used_at": "2026-09-30T13:05" }
+```
+
+#### 调用示例（curl，基于演示数据；演示库自带 BATCH-003 的一卷 LABEL-0001：印 500 / 贴 120 / 作废 5 / 剩 375）
+
+```bash
+# 1) 登记一卷：集合必须同时等于当前推导与放行快照
+curl -s -X POST http://localhost:3000/api/label-rolls \
+  -H 'Content-Type: application/json' -d '{
+    "batch_id": 3, "release_id": 1,
+    "allergens": ["乳","蛋","芝麻"],
+    "print_qty": 500, "registered_by": "包装组长-李雷"
+  }'
+# -> { id:2, roll_code:"LABEL-0002", print_qty:500, applied_qty:0, void_qty:0,
+#      remaining_qty:500, revision:0, status:"ACTIVE", active:true, ... }
+
+# 2) 按修订号 0 核销 100 贴用 + 3 作废 -> 剩 397，修订号前进到 1
+curl -s -X POST http://localhost:3000/api/label-rolls/2/consume \
+  -H 'Content-Type: application/json' \
+  -d '{"expected_revision":0,"applied":100,"voided":3,"used_by":"赵强"}'
+
+# 3) 再用旧修订号 0 核销 -> 409 REVISION_MISMATCH，整次拒绝、数量不变
+curl -s -X POST http://localhost:3000/api/label-rolls/2/consume \
+  -H 'Content-Type: application/json' -d '{"expected_revision":0,"applied":5,"voided":0}'
+# -> { error:"修订号已过期：卷当前修订号为 1，提交的预期修订号为 0；整次拒绝",
+#      code:"REVISION_MISMATCH" }
+
+# 4) 负数 / 超量 -> 400 INVALID_REQUEST / 409 OVER_LIMIT
+curl -s -X POST http://localhost:3000/api/label-rolls/2/consume \
+  -H 'Content-Type: application/json' -d '{"expected_revision":1,"applied":-1,"voided":0}'
+curl -s -X POST http://localhost:3000/api/label-rolls/2/consume \
+  -H 'Content-Type: application/json' -d '{"expected_revision":1,"applied":99999,"voided":0}'
+
+# 5) 集合改变 / 放行失效后：卷 RETIRED，余量冻结、已贴待复核，再核销 -> 409 ROLL_RETIRED
+#    （例如到“事件时间线”给 BATCH-002 加入花生原料，BATCH-003 推导集合变化）
+curl -s http://localhost:3000/api/state | node -e 'let d="";process.stdin.on("data",c=>d+=c)
+  .on("end",()=>{for(const r of JSON.parse(d).label_rolls)
+    console.log(r.batch_code,r.roll_code,r.status,r.print_qty,r.applied_qty,r.void_qty,
+      r.remaining_qty,r.retired_reason);})'
+
+# 6) 删除放行 -> 其名下有效卷立即永久停用（响应附 retired_rolls）
+curl -s -X DELETE http://localhost:3000/api/releases/1
+```
+
+| 场景 | HTTP | `code` |
+| --- | --- | --- |
+| 拟印集合与当前推导/放行快照不一致、印量非正整数、批次或放行缺失、放行不属于该批次、放行已失效 | 400 | `ALLERGENS_MISMATCH` / `INVALID_REQUEST` / `BATCH_NOT_FOUND` / `BATCH_NOT_PRODUCED` / `RELEASE_NOT_FOUND` / `RELEASE_BATCH_MISMATCH` / `RELEASE_INACTIVE` |
+| 核销：旧修订号 / 累计超印量 / 卷已停用 | 409 | `REVISION_MISMATCH` / `OVER_LIMIT` / `ROLL_RETIRED` |
+| 核销：负数、全零、缺少修订号、卷号不合法 | 400 | `INVALID_REQUEST` |
+| 核销不存在的卷 | 404 | `ROLL_NOT_FOUND` |
+
 ## 一键启动（Docker，从空环境开始）
 
 要求安装 Docker 与 Docker Compose（v2）。在项目目录执行：
@@ -164,8 +258,9 @@ npm start                      # 自动创建 data/allergen.db、建表并写入
 测试（不依赖外部框架，直接在临时库上跑）：
 
 ```bash
-npm test            # 校验引擎：无环/成环用例
-npm run test:replan # 启动临时端口的真实服务，端到端验证整组预演/确认应用全部语义
+npm test             # 校验引擎：无环/成环用例
+npm run test:replan  # 启动临时端口的真实服务，端到端验证整组预演/确认应用全部语义
+npm run test:labels  # 启动临时端口的真实服务，端到端验证标签卷登记/核销/永久停用全部语义
 ```
 
 ## 访问地址与端口
@@ -193,17 +288,25 @@ npm run test:replan # 启动临时端口的真实服务，端到端验证整组�
 ## 页面说明
 
 - **批次与放行**：设备当前残留（含来源路径）、每个批次的推导过敏原与逐条来源路径、
-  放行记录（绿色“放行有效”/红色“已失效”及失效原因），可在此登记放行。
+  放行记录（绿色“放行有效”/红色“已失效”及失效原因），可在此登记放行；
+  批次卡片底部显示该批标签卷摘要，点击直达标签卷页。
+- **过敏原标签卷**：按批次分组展示每卷印量、贴用、作废、剩余及当前修订号；
+  可在此包装前登记新卷、按修订号核销贴用/作废；停用卷红色标注并给出具体停用原因，
+  已贴数量标注“待复核”、余量标注“冻结”。
 - **事件时间线**：按时间排列全部加工/清洗事件，展示输入、引用批次与推导结果；
   “更正”可修改早期事件，保存时整单校验并触发重算。
 - **原料与设备**：维护原料档案（编码、名称、过敏原标签）与设备档案。
 
 ## 快速体验失效场景
 
-1. 打开“批次与放行”，可以看到演示数据中 `BATCH-003` 已登记放行（放行有效）。
-2. 到“事件时间线”，找到最早的 `BATCH-001`（08:00 面团），点击“更正”并加入原料 **全蛋液(EGG-01)**，提交。
+1. 打开“批次与放行”，可以看到演示数据中 `BATCH-003` 已登记放行（放行有效），
+   “过敏原标签卷”页有其演示卷 `LABEL-0001`（印 500、贴 120、作废 5、剩 375）。
+2. 到“事件时间线”，找到 `BATCH-002`（10:00 蛋糕糊），点击“更正”并加入原料 **花生碎(PEANUT-01)**，提交。
 3. 由于设备残留沿时间线传播并经 `BATCH-002` 被 `BATCH-003` 引用，重算后 `BATCH-003`
-   新增过敏原“蛋”，原放行记录自动变为**已失效**并标明原因，可重新登记放行。
+   新增过敏原“花生”，原放行记录自动变为**已失效**，`LABEL-0001` **永久停用**：
+   剩余 375 张冻结不可再贴，已贴 120 张标记待复核；撤销改动使集合恢复后，该卷也不会自动解冻。
+4. 在“过敏原标签卷”页尝试对停用卷核销，会收到 `ROLL_RETIRED` 拒绝；
+   重新登记放行后可登记新卷继续包装。
 
 ## 目录结构
 
@@ -211,14 +314,16 @@ npm run test:replan # 启动临时端口的真实服务，端到端验证整组�
 server/
   db.js          # SQLite 连接与表结构（导出 initSchema 供内存影子库复用）
   validation.js  # 全量校验（未来批次/循环/时间冲突/重复产出）
-  recompute.js   # 推导引擎：回放事件、批次并集、设备残留、放行核对
+  recompute.js   # 推导引擎：回放事件、批次并集、设备残留、放行核对、标签卷停用核对
+  labels.js      # 过敏原标签卷：三方一致登记、按修订号核销、永久停用
   replan.js      # 整组换线：影子库预演、业务版本签名令牌、事务确认应用
-  seed.js        # 首次启动演示数据
-  server.js      # Express API 与静态页面（含 /api/replan/preview|apply）
+  seed.js        # 首次启动演示数据（含一卷演示标签卷）
+  server.js      # Express API 与静态页面（含 /api/label-rolls、/api/replan/preview|apply）
 public/
   index.html  styles.css  app.js
 scripts/
   test-cycle.js    # 校验引擎单测
   test-replan.js   # 整组预演/确认应用端到端测试
+  test-labels.js   # 标签卷登记/核销/停用端到端测试
 Dockerfile  docker-compose.yml
 ```

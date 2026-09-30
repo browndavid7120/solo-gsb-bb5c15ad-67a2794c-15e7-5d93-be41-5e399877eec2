@@ -189,7 +189,15 @@ function recompute(db) {
     }
   }
 
-  return { invalidated };
+  // ---- 标签卷同步停用（终态，不自动恢复）----
+  // 触发条件（任一即永久停用）：
+  //   绑定放行已失效/被删除、批次加工不存在、批次当前推导集合与卷的拟印集合不同
+  //   （原料/加工事件变更、整组确认应用使集合改变等均经此路径生效）。
+  // 延迟 require 以避免 labels <-> recompute 循环依赖。
+  const { syncRollsAfterRecompute } = require('./labels');
+  const retiredRolls = syncRollsAfterRecompute(db, batchResult);
+
+  return { invalidated, retiredRolls };
 }
 
 module.exports = { recompute, sortedJson };

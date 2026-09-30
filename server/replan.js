@@ -499,6 +499,8 @@ function openShadow(sourceDb) {
   copy('batch_outputs', 'batch_id,allergens,paths_json');
   copy('equipment_residue', 'equipment_id,allergens,paths_json,last_cleaned_at');
   copy('releases', 'id,batch_id,released_at,released_by,snapshot_allergens,status,invalid_reason,created_event_seq');
+  copy('label_rolls', 'id,roll_code,batch_id,release_id,print_qty,applied_qty,void_qty,revision,allergen_set,registered_at,registered_by,status,retired_reason');
+  copy('label_roll_usages', 'id,roll_id,used_at,applied_qty,void_qty,expected_revision,used_by');
   shadow.pragma('foreign_keys = ON');
   return shadow;
 }
@@ -517,7 +519,24 @@ function simulate(db, changes) {
     }
     recompute(shadow);
     const after = takeSnapshot(shadow);
-    return { resolved, inserted, after, diff: diffSnapshots(before, after) };
+    // 影子库中“正式库原为 ACTIVE、重算后转为 RETIRED”的标签卷（本已停用的不计入“将停用”）
+    const activeRealIds = new Set(db.prepare(
+      "SELECT id FROM label_rolls WHERE status = 'ACTIVE'"
+    ).all().map((r) => r.id));
+    const retiredRolls = shadow.prepare(
+      `SELECT lr.id, lr.roll_code, b.code AS batch_code, lr.retired_reason, lr.applied_qty
+         FROM label_rolls lr LEFT JOIN batches b ON b.id = lr.batch_id
+        WHERE lr.status = 'RETIRED'`
+    ).all()
+      .filter((r) => activeRealIds.has(r.id))
+      .map((r) => ({
+        roll_id: r.id, roll_code: r.roll_code, batch_code: r.batch_code,
+        reason: r.retired_reason, applied_pending_review: r.applied_qty
+      }));
+    const diff = diffSnapshots(before, after);
+    diff.label_rolls_will_retire = retiredRolls;
+    diff.summary.label_rolls_will_retire = retiredRolls.length;
+    return { resolved, inserted, after, diff };
   } finally {
     shadow.close();
   }
@@ -578,8 +597,14 @@ function apply(db, body) {
     if (errors.length) {
       throw new ReplanError('REPLAN_REJECTED', '整组变更应用后的时间线校验未通过', errors);
     }
-    const { invalidated } = recompute(db);
+    const { invalidated, retiredRolls } = recompute(db);
     const after = takeSnapshot(db);
+    const appliedDiff = diffSnapshots(before, after);
+    appliedDiff.label_rolls_will_retire = retiredRolls.map((r) => ({
+      roll_id: r.id, roll_code: r.roll_code, batch_code: r.batch_code,
+      reason: r.reason, applied_pending_review: r.applied_pending_review
+    }));
+    appliedDiff.summary.label_rolls_will_retire = retiredRolls.length;
 
     // 提交后再计算一次指纹，作为新的业务版本随结果返回。
     response = {
@@ -588,7 +613,8 @@ function apply(db, body) {
       applied_version: body.version,
       inserted_clean_events: inserted,
       invalidated,
-      diff: diffSnapshots(before, after)
+      retired_rolls: retiredRolls,
+      diff: appliedDiff
     };
   });
   tx();
