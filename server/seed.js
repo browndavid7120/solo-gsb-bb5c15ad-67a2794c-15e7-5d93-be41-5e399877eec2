@@ -83,11 +83,29 @@ function seedIfEmpty() {
   const out = db.prepare(
     'SELECT allergens FROM batch_outputs WHERE batch_id = ?'
   ).get(batchIds['BATCH-003']);
-  db.prepare(
+  const releaseInfo = db.prepare(
     `INSERT INTO releases (batch_id, released_at, released_by, snapshot_allergens, status, created_event_seq)
      VALUES (?,?,?,?,'ACTIVE',(SELECT COUNT(*) FROM events))`
   ).run(batchIds['BATCH-003'], '2026-09-30T11:30', '质检员-王敏',
         sortedJson(JSON.parse(out.allergens)));
+  const releaseId = releaseInfo.lastInsertRowid;
+
+  // 包装前登记一卷 BATCH-003 的过敏原标签（集合与当前推导、放行快照一致）：
+  // 印量 500，演示已贴 120、作废 3。按 README“快速体验”给 BATCH-001 加入全蛋液后，
+  // 重算使 BATCH-003 集合新增“蛋”，本卷将被永久停用、已贴数量进入待复核。
+  db.prepare(
+    `INSERT INTO label_rolls
+       (roll_code, batch_id, release_id, allergens, printed_qty,
+        used_qty, void_qty, status, review_pending, revision,
+        registered_at, registered_by)
+     VALUES ('LR-0001', ?, ?, ?, 500, 120, 3, 'ACTIVE', 0, 2,
+             '2026-09-30T11:35', '包装班长-李强')`
+  ).run(batchIds['BATCH-003'], releaseId, sortedJson(JSON.parse(out.allergens)));
+  db.prepare(
+    `INSERT INTO label_roll_ledger
+       (roll_id, applied_delta, void_delta, revision_after, operated_by, note, created_at)
+     VALUES (1, 120, 3, 2, '包装班长-李强', '首批领用核销', '2026-09-30T12:10:00')`
+  ).run();
 
   return true;
 }

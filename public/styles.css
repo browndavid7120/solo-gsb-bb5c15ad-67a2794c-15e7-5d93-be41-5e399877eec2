@@ -137,7 +137,8 @@ table.grid tr:last-child td { border-bottom: none; }
 .form-row label { width: 130px; flex-shrink: 0; font-size: 13px; color: #33475b; }
 .form-row.align-top { align-items: flex-start; }
 .form-row.align-top label { margin-top: 5px; }
-.form-row input[type=text], .form-row input[type=datetime-local], .form-row select {
+.form-row input[type=text], .form-row input[type=datetime-local],
+.form-row input[type=number], .form-row select {
   flex: 1; padding: 7px 10px; border: 1px solid #cdd7e0; border-radius: 6px; font-size: 13px; font-family: inherit;
 }
 .check-grid { flex: 1; display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 4px 14px; }
@@ -159,3 +160,31 @@ table.grid tr:last-child td { border-bottom: none; }
 
 details summary { cursor: pointer; color: var(--primary); font-size: 12.5px; margin-top: 6px; }
 @media (max-width: 860px) { .base-grid { grid-template-columns: 1fr; } }
+
+/* 过敏原标签卷 */
+.roll-box { margin-top: 12px; border-top: 1px dashed var(--line); padding-top: 6px; }
+.roll-head { margin: 8px 0 8px; }
+.roll-head h3 { font-size: 14px; }
+.roll-list { display: flex; flex-direction: column; gap: 10px; }
+.roll-item {
+  border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: #fbfcfd;
+}
+.roll-item.stopped { border-color: #e3b3ac; background: var(--danger-bg); }
+.roll-head-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.roll-code { font-weight: 700; font-size: 14px; font-variant-numeric: tabular-nums; }
+.roll-qty {
+  display: flex; gap: 18px; flex-wrap: wrap; margin-top: 7px; font-size: 13px; color: #40535f;
+}
+.roll-qty b { font-variant-numeric: tabular-nums; }
+.qty-used { color: #13506b; }
+.qty-void { color: var(--warn); }
+.qty-avail { color: var(--ok); }
+.qty-zero { color: var(--danger); }
+.roll-ledger { margin-top: 6px; }
+.ledger-table { margin-top: 6px; font-size: 12.5px; }
+.ledger-table th, .ledger-table td { padding: 6px 9px; }
+.consume-summary {
+  display: flex; gap: 16px; flex-wrap: wrap; margin: -4px 0 12px 142px;
+  font-size: 13px; color: #40535f; background: #f4f8fa; border: 1px solid var(--line);
+  border-radius: 6px; padding: 7px 12px;
+}

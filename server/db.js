@@ -89,9 +89,45 @@ function initSchema(d) {
     created_event_seq INTEGER NOT NULL DEFAULT 0  -- 登记时的事件版本号
   );
 
+  -- 过敏原标签卷（包装前按“批次 + 有效放行”登记；停用为终态，不自动恢复）
+  CREATE TABLE IF NOT EXISTS label_rolls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    roll_code TEXT NOT NULL UNIQUE,               -- 卷号，如 LR-0001
+    batch_id INTEGER NOT NULL REFERENCES batches(id),
+    release_id INTEGER REFERENCES releases(id) ON DELETE SET NULL, -- 绑定的放行快照；放行删除时置空
+    allergens TEXT NOT NULL DEFAULT '[]',         -- 拟印过敏原集合（排序快照，登记时三重一致）
+    printed_qty INTEGER NOT NULL,                 -- 印量（正整数）
+    used_qty INTEGER NOT NULL DEFAULT 0,          -- 累计贴用
+    void_qty INTEGER NOT NULL DEFAULT 0,          -- 累计作废
+    status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','DEACTIVATED')),
+    review_pending INTEGER NOT NULL DEFAULT 0,    -- 停用后已贴数量标记待复核（1=待复核）
+    revision INTEGER NOT NULL DEFAULT 1,          -- 核销预期修订号（每次成功核销 +1）
+    registered_at TEXT NOT NULL,
+    registered_by TEXT NOT NULL DEFAULT '',
+    deactivated_at TEXT,
+    deactivate_reason TEXT NOT NULL DEFAULT '',
+    CHECK (printed_qty > 0 AND used_qty >= 0 AND void_qty >= 0
+           AND used_qty + void_qty <= printed_qty)
+  );
+
+  -- 标签卷核销流水（贴用/作废逐笔留痕，修订号递增可审计）
+  CREATE TABLE IF NOT EXISTS label_roll_ledger (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    roll_id INTEGER NOT NULL REFERENCES label_rolls(id) ON DELETE CASCADE,
+    applied_delta INTEGER NOT NULL DEFAULT 0,
+    void_delta INTEGER NOT NULL DEFAULT 0,
+    revision_after INTEGER NOT NULL,              -- 本笔核销后的修订号
+    operated_by TEXT NOT NULL DEFAULT '',
+    note TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+  );
+
   CREATE INDEX IF NOT EXISTS idx_events_time ON events(event_time, id);
   CREATE INDEX IF NOT EXISTS idx_process_inputs_event ON process_inputs(event_id);
   CREATE INDEX IF NOT EXISTS idx_releases_batch ON releases(batch_id);
+  CREATE INDEX IF NOT EXISTS idx_label_rolls_batch ON label_rolls(batch_id);
+  CREATE INDEX IF NOT EXISTS idx_label_rolls_release ON label_rolls(release_id);
+  CREATE INDEX IF NOT EXISTS idx_label_roll_ledger_roll ON label_roll_ledger(roll_id);
   `);
 }
 

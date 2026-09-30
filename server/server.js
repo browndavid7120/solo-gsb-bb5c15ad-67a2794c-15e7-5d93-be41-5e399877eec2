@@ -3,9 +3,10 @@ const path = require('path');
 const express = require('express');
 const { getDb } = require('./db');
 const { validateAll } = require('./validation');
-const { recompute, sortedJson } = require('./recompute');
+const { recompute, sortedJson, nowLocal } = require('./recompute');
 const { seedIfEmpty } = require('./seed');
 const replan = require('./replan');
+const labels = require('./labels');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -105,7 +106,11 @@ app.get('/api/state', (req, res) => {
     ).all(b.id).map((r) => ({
       ...r,
       snapshot_allergens: JSON.parse(r.snapshot_allergens)
-    }))
+    })),
+    label_rolls: db.prepare(
+      `SELECT * FROM label_rolls WHERE batch_id = ?
+        ORDER BY registered_at DESC, id DESC`
+    ).all(b.id).map((r) => labels.formatRoll(r))
   }));
 
   res.json({ materials, equipment, events, batches });
@@ -123,7 +128,11 @@ function mutateEvents(fn) {
       throw err; // 回滚整次提交
     }
     const recomputeResult = recompute(d);
-    return { ret, invalidated: recomputeResult.invalidated };
+    return {
+      ret,
+      invalidated: recomputeResult.invalidated,
+      deactivated_rolls: recomputeResult.deactivatedRolls
+    };
   })();
   return result;
 }
@@ -154,8 +163,8 @@ app.put('/api/materials/:id', (req, res) => {
     ).run(code, name, JSON.stringify(allergens), req.params.id);
     if (!info.changes) return res.status(404).json({ error: '原料不存在' });
     // 过敏原被修改会改变批次推导结果，需要全量重算
-    const { invalidated } = mutateEvents(() => {});
-    res.json({ ok: true, invalidated });
+    const { invalidated, deactivated_rolls } = mutateEvents(() => {});
+    res.json({ ok: true, invalidated, deactivated_rolls });
   } catch (err) { badRequest(res, err); }
 });
 
@@ -250,7 +259,7 @@ app.post('/api/events', (req, res) => {
       }
       return eid;
     });
-    res.json({ id: ret, invalidated });
+    res.json({ id: ret, invalidated, deactivated_rolls });
   } catch (err) { badRequest(res, err); }
 });
 
@@ -263,7 +272,7 @@ app.put('/api/events/:id', (req, res) => {
     if (body.type !== existing.type) {
       return res.status(400).json({ error: '事件类型（加工/清洗）不可变更，请删除后新建' });
     }
-    const { invalidated } = mutateEvents((d) => {
+    const { invalidated, deactivated_rolls } = mutateEvents((d) => {
       if (body.type === 'PROCESS') {
         d.prepare('UPDATE batches SET code=? WHERE id=?')
           .run(body.batch_code, existing.batch_id);
@@ -281,7 +290,7 @@ app.put('/api/events/:id', (req, res) => {
         'UPDATE events SET event_time=?, equipment_id=?, note=? WHERE id=?'
       ).run(body.event_time, body.equipment_id, body.note, existing.id);
     });
-    res.json({ ok: true, invalidated });
+    res.json({ ok: true, invalidated, deactivated_rolls });
   } catch (err) { badRequest(res, err); }
 });
 
@@ -290,7 +299,7 @@ app.delete('/api/events/:id', (req, res) => {
     const existing = db.prepare('SELECT id, type, batch_id FROM events WHERE id=?')
       .get(req.params.id);
     if (!existing) return res.status(404).json({ error: '事件不存在' });
-    const { invalidated } = mutateEvents((d) => {
+    const { invalidated, deactivated_rolls } = mutateEvents((d) => {
       if (existing.type === 'PROCESS' && existing.batch_id) {
         const referenced = d.prepare(
           'SELECT COUNT(*) AS c FROM process_inputs WHERE batch_id=?'
@@ -304,12 +313,18 @@ app.delete('/api/events/:id', (req, res) => {
         if (hasRelease) {
           throw new Error('该批次已有放行记录，请先删除相关放行记录后再删除加工事件');
         }
+        const hasRoll = d.prepare(
+          'SELECT COUNT(*) AS c FROM label_rolls WHERE batch_id=?'
+        ).get(existing.batch_id).c;
+        if (hasRoll) {
+          throw new Error('该批次已登记过敏原标签卷，标签卷为终态记录，不允许删除其加工事件');
+        }
         d.prepare('DELETE FROM batch_outputs WHERE batch_id=?').run(existing.batch_id);
         d.prepare('DELETE FROM batches WHERE id=?').run(existing.batch_id);
       }
       d.prepare('DELETE FROM events WHERE id=?').run(existing.id);
     });
-    res.json({ ok: true, invalidated });
+    res.json({ ok: true, invalidated, deactivated_rolls });
   } catch (err) { badRequest(res, err); }
 });
 
@@ -365,10 +380,64 @@ app.post('/api/releases', (req, res) => {
 });
 
 app.delete('/api/releases/:id', (req, res) => {
-  const info = db.prepare('DELETE FROM releases WHERE id=?').run(req.params.id);
-  if (!info.changes) return res.status(404).json({ error: '放行记录不存在' });
-  res.json({ ok: true });
+  try {
+    // 删除放行：绑定该放行的有效标签卷在同一事务内永久停用（不重算，集合未变）。
+    const result = db.transaction(() => {
+      const rel = db.prepare('SELECT id FROM releases WHERE id=?').get(req.params.id);
+      if (!rel) return null;
+      const activeRolls = db.prepare(
+        "SELECT id, roll_code FROM label_rolls WHERE release_id=? AND status='ACTIVE'"
+      ).all(rel.id);
+      const reason = '绑定的放行记录已被删除';
+      const stopped = db.prepare(
+        `UPDATE label_rolls
+            SET status='DEACTIVATED', review_pending=1,
+                release_id=NULL, deactivated_at=?, deactivate_reason=?
+          WHERE release_id=? AND status='ACTIVE'`
+      ).run(nowLocal(), reason, rel.id);
+      db.prepare('DELETE FROM releases WHERE id=?').run(rel.id);
+      return {
+        deactivated_rolls: activeRolls.map((r) => ({
+          id: r.id, batch_code: '', reason
+        })),
+        changed: stopped.changes
+      };
+    })();
+    if (!result) return res.status(404).json({ error: '放行记录不存在' });
+    res.json({ ok: true, deactivated_rolls: result.deactivated_rolls });
+  } catch (err) { badRequest(res, err); }
 });
+
+// ---------- 过敏原标签卷 ----------
+app.post('/api/label-rolls', (req, res) => {
+  try {
+    res.json(labels.register(db, req.body));
+  } catch (err) { sendLabelError(res, err); }
+});
+
+app.post('/api/label-rolls/:id/consume', (req, res) => {
+  try {
+    res.json(labels.consume(db, parseInt(req.params.id, 10), req.body));
+  } catch (err) { sendLabelError(res, err); }
+});
+
+app.get('/api/label-rolls/:id', (req, res) => {
+  try {
+    res.json(labels.detail(db, parseInt(req.params.id, 10)));
+  } catch (err) { sendLabelError(res, err); }
+});
+
+function sendLabelError(res, err) {
+  if (err && err.name === 'LabelError') {
+    const status = err.code === 'LABEL_NOT_FOUND' ? 404
+      : err.code === 'LABEL_CONFLICT' ? 409 : 400;
+    return res.status(status).json({
+      error: err.message, code: err.code, details: err.details
+    });
+  }
+  console.error(err);
+  return res.status(500).json({ error: err && err.message ? err.message : '服务器内部错误' });
+}
 
 // ---------- 换线整组预演 / 确认应用 ----------
 // 预演：在内存影子库上应用整组变更并全量重算，只返回差异与业务版本，不写正式数据。

@@ -499,6 +499,12 @@ function openShadow(sourceDb) {
   copy('batch_outputs', 'batch_id,allergens,paths_json');
   copy('equipment_residue', 'equipment_id,allergens,paths_json,last_cleaned_at');
   copy('releases', 'id,batch_id,released_at,released_by,snapshot_allergens,status,invalid_reason,created_event_seq');
+  // 标签卷/核销流水仅随影子库拷贝：预演的 recompute 会在影子库中停用相关卷以验证语义，
+  // 不触碰正式库；其结果不属于预演差异（diff 只含既有事件/残留/放行三类）。
+  copy('label_rolls',
+    'id,roll_code,batch_id,release_id,allergens,printed_qty,used_qty,void_qty,status,review_pending,revision,registered_at,registered_by,deactivated_at,deactivate_reason');
+  copy('label_roll_ledger',
+    'id,roll_id,applied_delta,void_delta,revision_after,operated_by,note,created_at');
   shadow.pragma('foreign_keys = ON');
   return shadow;
 }
@@ -522,7 +528,6 @@ function simulate(db, changes) {
     shadow.close();
   }
 }
-
 // ---------- 对外入口 ----------
 function preview(db, rawChanges) {
   const [normErr, changes] = normalizeChanges(rawChanges);
@@ -578,7 +583,7 @@ function apply(db, body) {
     if (errors.length) {
       throw new ReplanError('REPLAN_REJECTED', '整组变更应用后的时间线校验未通过', errors);
     }
-    const { invalidated } = recompute(db);
+    const { invalidated, deactivatedRolls } = recompute(db);
     const after = takeSnapshot(db);
 
     // 提交后再计算一次指纹，作为新的业务版本随结果返回。
@@ -588,6 +593,7 @@ function apply(db, body) {
       applied_version: body.version,
       inserted_clean_events: inserted,
       invalidated,
+      deactivated_rolls: deactivatedRolls,
       diff: diffSnapshots(before, after)
     };
   });

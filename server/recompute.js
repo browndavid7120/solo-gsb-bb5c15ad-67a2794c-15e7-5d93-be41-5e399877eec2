@@ -189,7 +189,64 @@ function recompute(db) {
     }
   }
 
-  return { invalidated };
+  // ---- 核对过敏原标签卷：集合改变或绑定放行失效即永久停用（一次性，不自动恢复）----
+  const rolls = db.prepare(
+    `SELECT lr.id, lr.batch_id, lr.release_id, lr.allergens,
+            b.code AS batch_code
+       FROM label_rolls lr JOIN batches b ON b.id = lr.batch_id
+      WHERE lr.status = 'ACTIVE'`
+  ).all();
+  // 放行失效后的最新状态（上面可能刚把 ACTIVE 置为 INVALIDATED）
+  const releaseStatus = new Map(
+    db.prepare('SELECT id, status FROM releases').all().map((r) => [r.id, r.status])
+  );
+  const deactivatedRolls = [];
+  const deactivateRoll = db.prepare(
+    `UPDATE label_rolls
+        SET status='DEACTIVATED', review_pending=1,
+            deactivated_at=?, deactivate_reason=?
+      WHERE id=?`
+  );
+  for (const roll of rolls) {
+    const result = batchResult.get(roll.batch_id);
+    const reasons = [];
+    if (!result) {
+      reasons.push('该批次的加工事件已不存在，无法重新推导过敏原');
+    } else {
+      const current = sortedJson([...result.keys()]);
+      if (current !== roll.allergens) {
+        const oldSet = JSON.parse(roll.allergens);
+        const newSet = [...result.keys()];
+        const added = newSet.filter((a) => !oldSet.includes(a));
+        const removed = oldSet.filter((a) => !newSet.includes(a));
+        const parts = [];
+        if (added.length) parts.push(`新增：${added.join('、')}`);
+        if (removed.length) parts.push(`移除：${removed.join('、')}`);
+        reasons.push(`原料或加工事件变更后重算，批次过敏原集合与标签卷拟印集合不一致（${parts.join('；')}）`);
+      }
+    }
+    const relStatus = roll.release_id != null ? releaseStatus.get(roll.release_id) : null;
+    if (roll.release_id == null) {
+      reasons.push('绑定的放行记录已被删除');
+    } else if (relStatus !== 'ACTIVE') {
+      reasons.push('绑定的放行记录已失效');
+    }
+    if (reasons.length) {
+      const reason = reasons.join('；');
+      deactivateRoll.run(nowLocal(), reason, roll.id);
+      deactivatedRolls.push({ id: roll.id, batch_code: roll.batch_code, reason });
+    }
+  }
+
+  return { invalidated, deactivatedRolls };
 }
 
-module.exports = { recompute, sortedJson };
+// 本地时间，格式与事件/放行时间一致：YYYY-MM-DDTHH:MM(:SS)
+function nowLocal() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T` +
+         `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+module.exports = { recompute, sortedJson, nowLocal };

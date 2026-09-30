@@ -175,6 +175,57 @@
   </div>
 </div>
 
+<!-- ============ 过敏原标签卷弹窗 ============ -->
+<div id="rollModal" class="modal hidden">
+  <div class="modal-box wide">
+    <h3>登记过敏原标签卷（包装前）</h3>
+    <form id="rollForm">
+      <input type="hidden" name="batch_id">
+      <div class="form-row"><label>批次</label><input type="text" name="batch_code" readonly></div>
+      <div class="form-row">
+        <label>绑定放行快照 *</label>
+        <select name="release_id" id="rollRelease" required></select>
+      </div>
+      <div class="form-row align-top">
+        <label>当前推导过敏原</label>
+        <div id="rollCurrentAllergens" class="tag-row"></div>
+      </div>
+      <div class="form-row align-top">
+        <label>拟印过敏原集合 *</label>
+        <div id="rollAllergens" class="check-grid"></div>
+        <small class="hint">必须与上方当前批次推导结果、所选放行快照完全一致；不一致将整次拒绝。</small>
+      </div>
+      <div class="form-row"><label>印量（正整数张数）*</label><input type="number" name="printed_qty" min="1" step="1" required></div>
+      <div class="form-row"><label>登记人</label><input type="text" name="registered_by" placeholder="姓名/工号"></div>
+      <div class="modal-actions">
+        <button type="button" class="btn" data-close>取消</button>
+        <button type="submit" class="btn primary">登记标签卷</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div id="consumeModal" class="modal hidden">
+  <div class="modal-box">
+    <h3>核销标签卷（贴用 / 作废）</h3>
+    <form id="consumeForm">
+      <input type="hidden" name="roll_id">
+      <div class="form-row"><label>卷号</label><input type="text" name="roll_code" readonly></div>
+      <div id="consumeSummary" class="consume-summary"></div>
+      <div class="form-row"><label>本次贴用张数</label><input type="number" name="applied_delta" min="0" step="1" value="0"></div>
+      <div class="form-row"><label>本次作废张数</label><input type="number" name="void_delta" min="0" step="1" value="0"></div>
+      <div class="form-row"><label>操作人</label><input type="text" name="operated_by" placeholder="姓名/工号"></div>
+      <div class="form-row"><label>备注</label><input type="text" name="note" placeholder="如：换版前旧标签作废"></div>
+      <div class="form-row"><label>预期修订号 *</label><input type="number" name="expected_revision" min="1" step="1" required></div>
+      <small class="hint" style="margin:-6px 0 10px 142px">修订号须等于该卷当前修订号；并发/旧修订号、负数或累计超印量均整次拒绝。</small>
+      <div class="modal-actions">
+        <button type="button" class="btn" data-close>取消</button>
+        <button type="submit" class="btn primary">提交核销</button>
+      </div>
+    </form>
+  </div>
+</div>
+
 <script src="app.js"></script>
 </body>
 </html>

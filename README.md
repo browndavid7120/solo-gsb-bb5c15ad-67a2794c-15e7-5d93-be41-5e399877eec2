@@ -26,6 +26,26 @@
   页面红色标注并给出具体原因（新增了哪些过敏原 / 移除了哪些过敏原）；失效为终态，需重新登记放行。
 - 集合相同则放行保持有效。
 
+### 过敏原标签卷（包装前登记 → 按修订号核销 → 变更即永久停用）
+
+包装前按**现有批次 + 一条有效放行记录**登记一卷过敏原标签：
+
+- **登记**（`POST /api/label-rolls`）：录入**拟印过敏原集合、正整数印量张数、操作人**及绑定的放行记录。
+  拟印集合必须与**当前批次推导结果**和**所选放行快照****完全一致**（三重一致），否则整次拒绝；
+  成功后返回**卷号**（`LR-0001` 起顺延）与**可用张数**（初始=印量）。
+- **核销**（`POST /api/label-rolls/:id/consume`）：每卷凭**预期修订号** `expected_revision`
+  核销本次**贴用**与**作废**张数；核销成功后修订号 +1 并写入逐笔流水，可用张数=印量−贴用−作废。
+  - 预期修订号过期（他人已核销过）→ `409 LABEL_CONFLICT`；
+  - 张数为负数、非整数，或贴用+作废累计超过印量 → `400 LABEL_REJECTED`；
+  - 以上情形**整次拒绝**，不写入流水、修订号不变。
+- **永久停用（终态，不自动解冻）**：出现下列任一情况，该卷立即永久停用，
+  **已贴数量标记“待复核”，余量不可再贴**；页面红色显示停用原因：
+  - 原料过敏原或加工事件变更（含换线整组确认应用）使批次推导集合与拟印集合不一致；
+  - 绑定的放行记录失效（重算集合改变）或被删除。
+  - 即使以后集合恢复一致、或重新登记放行，**已停用卷也不会自动恢复**，需登记新卷。
+- **页面**：“批次与放行”按批次展示每卷的**印量、贴用、作废、剩余**张数、当前修订号、
+  拟印集合、停用原因及“已贴数量待复核”标记，并提供登记、核销与核销流水查询。
+
 ### 提交约束（整次提交事务化，违反任意一条则整单回滚拒绝）
 
 - 加工只能引用**产出时间严格更早**的批次——引用未来批次被拒绝。
@@ -131,6 +151,119 @@ curl -s -X POST http://localhost:3000/api/replan/apply \
 | apply 的 changes 与预演不一致 | 409 | `CHANGES_MISMATCH` |
 | 预演后正式数据已变更导致版本过期（含重复应用同一版本、版本过期） | 409 | `VERSION_EXPIRED` |
 
+## 过敏原标签卷 HTTP API（本轮新增）
+
+演示数据已为 `BATCH-003`（其放行有效）登记一卷 `LR-0001`：印量 500、已贴 120、作废 3、
+剩余 377、当前修订号 2，可直接核销体验。
+
+#### 1) 登记一卷（三重一致校验）
+
+`POST /api/label-rolls`，请求体：
+
+| 字段 | 说明 |
+| --- | --- |
+| `batch_id` | 现有批次 id（须有加工/推导结果） |
+| `release_id` | 该批次一条**有效**放行记录 id；放行已失效/不属本批次均拒绝 |
+| `allergens` | 拟印过敏原集合（字符串数组）；须与批次当前推导结果、放行快照**完全一致** |
+| `printed_qty` | 印量，**正整数**张数 |
+| `registered_by` | 操作人（可选，缺省“未署名”） |
+| `registered_at` | 登记时间（可选，缺省服务器当前时间，格式 `YYYY-MM-DDTHH:MM`） |
+
+```bash
+# 先查批次 id、推导集合与其有效放行 id
+curl -s http://localhost:3000/api/state | head -c 2000
+
+# BATCH-003 推导集合为 ["乳","蛋","芝麻"]，有效放行 id=1
+curl -s -X POST http://localhost:3000/api/label-rolls \
+  -H 'Content-Type: application/json' -d '{
+    "batch_id": 3,
+    "release_id": 1,
+    "allergens": ["乳","蛋","芝麻"],
+    "printed_qty": 500,
+    "registered_by": "包装班长-李强"
+  }'
+# -> { ok:true, id:2, roll_code:"LR-0002", batch_id:3, release_id:1,
+#      allergens:["乳","蛋","芝麻"], printed_qty:500,
+#      applied_qty:0, void_qty:0, available_qty:500,
+#      revision:1, status:"ACTIVE", registered_at:"...", registered_by:"..." }
+```
+
+不一致 / 印量非法（HTTP 400）：
+
+```json
+{ "error": "拟印过敏原集合与当前批次推导结果不一致，整次拒绝",
+  "code": "LABEL_REJECTED",
+  "details": ["拟印集合多出：不存在的过敏原"] }
+```
+
+#### 2) 核销贴用 / 作废（凭预期修订号）
+
+`POST /api/label-rolls/:id/consume`，请求体：
+
+| 字段 | 说明 |
+| --- | --- |
+| `expected_revision` | **必填**，该卷当前修订号；成功一次 +1 |
+| `applied_delta` | 本次贴用张数（非负整数，缺省 0） |
+| `void_delta` | 本次作废张数（非负整数，缺省 0；两者不能同时为 0） |
+| `operated_by` / `note` | 操作人 / 备注（可选） |
+
+```bash
+curl -s -X POST http://localhost:3000/api/label-rolls/2/consume \
+  -H 'Content-Type: application/json' -d '{
+    "expected_revision": 1,
+    "applied_delta": 120,
+    "void_delta": 3,
+    "operated_by": "包装工-赵倩"
+  }'
+# -> { ok:true, id:2, roll_code:"LR-0002", revision:2,
+#      applied_qty:120, void_qty:3, available_qty:377, status:"ACTIVE" }
+
+# 再用旧修订号 → 409 LABEL_CONFLICT（整次拒绝，状态/流水不变）
+curl -s -X POST http://localhost:3000/api/label-rolls/2/consume \
+  -H 'Content-Type: application/json' -d '{"expected_revision":1,"applied_delta":1}'
+# -> { "error": "修订号已过期：该卷当前修订号为 2，提交的预期修订号为 1；整次拒绝",
+#      "code": "LABEL_CONFLICT", "details": [] }
+
+# 负数 / 累计超量 → 400 LABEL_REJECTED（整次拒绝，不写流水）
+curl -s -X POST http://localhost:3000/api/label-rolls/2/consume \
+  -H 'Content-Type: application/json' -d '{"expected_revision":2,"applied_delta":400}'
+# -> { "error": "本次核销累计将超过印量（印量 500，已贴 120，已作废 3，当前可用 377，
+#                本次申请贴用 400 / 作废 0）；整次拒绝", "code": "LABEL_REJECTED", "details": [] }
+```
+
+#### 3) 卷详情与核销流水
+
+```bash
+curl -s http://localhost:3000/api/label-rolls/2
+# -> { id, roll_code, batch_id, batch_code, release_id, allergens,
+#      printed_qty, applied_qty, void_qty, available_qty,
+#      status, review_pending, revision, registered_at, registered_by,
+#      deactivated_at, deactivate_reason,
+#      ledger:[{id, applied_delta, void_delta, revision_after, operated_by, note, created_at}] }
+```
+
+#### 4) 停用触发后的表现
+
+- 通过 `PUT /api/events/:id`、`PUT /api/materials/:id` 或 `POST /api/replan/apply`
+  改变批次集合（如给 `BATCH-001` 加入“全蛋液”，变化经设备残留/批次引用传播到 `BATCH-003`）：
+  响应体在既有字段外附带 `deactivated_rolls:[{id,batch_code,reason}]`；
+  卷变 `DEACTIVATED`、`review_pending:true`，核销返回
+  `409 LABEL_CONFLICT`（“余量不可再贴；已贴数量待复核”）。
+- `DELETE /api/releases/:id`：绑定该放行的有效卷同事务停用，响应同样带 `deactivated_rolls`。
+- 之后即使把集合改回原样，卷**仍保持停用**；放行也不会自动复活（既有语义），
+  需重新登记放行并登记**新卷**。
+
+| 标签卷场景 | HTTP | `code` |
+| --- | --- | --- |
+| 拟印集合不一致 / 放行无效或不属本批次 / 印量非正整数 / 张数负数 / 累计超量 / 张数全 0 | 400 | `LABEL_REJECTED` |
+| 预期修订号过期（旧修订号） | 409 | `LABEL_CONFLICT` |
+| 卷已永久停用仍请求核销（余量不可再贴） | 409 | `LABEL_CONFLICT` |
+| 卷不存在 | 404 | `LABEL_NOT_FOUND` |
+
+> 既有事件、预演/确认应用、放行接口的字段与语义保持不变；上述写接口仅在响应中
+> **新增** `deactivated_rolls` 字段。标签卷的登记/核销**不改变批次推导结果**，
+> 也不会使已取得的预演版本过期。
+
 ## 一键启动（Docker，从空环境开始）
 
 要求安装 Docker 与 Docker Compose（v2）。在项目目录执行：
@@ -166,6 +299,7 @@ npm start                      # 自动创建 data/allergen.db、建表并写入
 ```bash
 npm test            # 校验引擎：无环/成环用例
 npm run test:replan # 启动临时端口的真实服务，端到端验证整组预演/确认应用全部语义
+npm run test:labels # 启动临时端口的真实服务，端到端验证标签卷登记/核销/永久停用全部语义
 ```
 
 ## 访问地址与端口
@@ -193,32 +327,39 @@ npm run test:replan # 启动临时端口的真实服务，端到端验证整组�
 ## 页面说明
 
 - **批次与放行**：设备当前残留（含来源路径）、每个批次的推导过敏原与逐条来源路径、
-  放行记录（绿色“放行有效”/红色“已失效”及失效原因），可在此登记放行。
+  放行记录（绿色“放行有效”/红色“已失效”及失效原因），可在此登记放行；
+  每个批次下方按卷展示**过敏原标签卷**（印量/贴用/作废/剩余/修订号/拟印集合/停用原因/待复核），
+  可登记新卷、核销贴用与作废、展开逐笔核销流水。
 - **事件时间线**：按时间排列全部加工/清洗事件，展示输入、引用批次与推导结果；
   “更正”可修改早期事件，保存时整单校验并触发重算。
 - **原料与设备**：维护原料档案（编码、名称、过敏原标签）与设备档案。
 
 ## 快速体验失效场景
 
-1. 打开“批次与放行”，可以看到演示数据中 `BATCH-003` 已登记放行（放行有效）。
+1. 打开“批次与放行”，可以看到演示数据中 `BATCH-003` 已登记放行（放行有效），
+   且已有一卷标签 `LR-0001`（印量 500、已贴 120、作废 3、剩余 377）。
 2. 到“事件时间线”，找到最早的 `BATCH-001`（08:00 面团），点击“更正”并加入原料 **全蛋液(EGG-01)**，提交。
 3. 由于设备残留沿时间线传播并经 `BATCH-002` 被 `BATCH-003` 引用，重算后 `BATCH-003`
-   新增过敏原“蛋”，原放行记录自动变为**已失效**并标明原因，可重新登记放行。
+   新增过敏原“蛋”，原放行记录自动变为**已失效**并标明原因，可重新登记放行；
+   `LR-0001` 同时**永久停用**，已贴的 120 张标记**待复核**，剩余 377 张不可再贴；
+   即使随后去掉全蛋液使集合恢复，该卷也不会自动解冻，需登记新卷。
 
 ## 目录结构
 
 ```
 server/
-  db.js          # SQLite 连接与表结构（导出 initSchema 供内存影子库复用）
+  db.js          # SQLite 连接与表结构（含标签卷/核销流水，导出 initSchema 供内存影子库复用）
   validation.js  # 全量校验（未来批次/循环/时间冲突/重复产出）
-  recompute.js   # 推导引擎：回放事件、批次并集、设备残留、放行核对
+  recompute.js   # 推导引擎：回放事件、批次并集、设备残留、放行核对、标签卷永久停用核对
   replan.js      # 整组换线：影子库预演、业务版本签名令牌、事务确认应用
-  seed.js        # 首次启动演示数据
-  server.js      # Express API 与静态页面（含 /api/replan/preview|apply）
+  labels.js      # 过敏原标签卷：登记（三重一致）、按修订号核销、卷详情与流水
+  seed.js        # 首次启动演示数据（含一卷示例标签）
+  server.js      # Express API 与静态页面（含 /api/replan、/api/label-rolls）
 public/
   index.html  styles.css  app.js
 scripts/
   test-cycle.js    # 校验引擎单测
   test-replan.js   # 整组预演/确认应用端到端测试
+  test-labels.js   # 标签卷登记/核销/永久停用端到端测试
 Dockerfile  docker-compose.yml
 ```
